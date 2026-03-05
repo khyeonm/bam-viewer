@@ -1,0 +1,150 @@
+.bam-plugin {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  color: #333;
+}
+
+.bam-summary {
+  display: flex;
+  gap: 16px;
+  padding: 10px 14px;
+  background: #f0f4f8;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.bam-summary .stat { font-size: 12px; color: #555; }
+.bam-summary .stat b { color: #1a1a1a; }
+
+.bam-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.bam-controls select, .bam-controls input {
+  padding: 5px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 12px;
+  background: #fff;
+}
+.bam-controls input[type="text"] { width: 180px; }
+
+.bam-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+}
+.bam-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.bam-table th {
+  background: #f7f8fa;
+  padding: 6px 8px;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid #e0e0e0;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.bam-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid #f0f0f0;
+  white-space: nowrap;
+}
+.bam-table tr:hover { background: #f5f8fc; }
+
+.flag-badge {
+  display: inline-block;
+  padding: 1px 4px;
+  margin: 1px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-weight: 500;
+}
+.flag-on { background: #e3f2fd; color: #1565c0; }
+.flag-off { background: #f5f5f5; color: #bbb; }
+.flag-unmapped { background: #ffebee; color: #c62828; }
+
+.cigar-op {
+  display: inline-block;
+  padding: 0 2px;
+  font-family: monospace;
+  font-size: 10px;
+  border-radius: 2px;
+}
+.cigar-M { background: #e0e0e0; }
+.cigar-I { background: #c8e6c9; color: #2e7d32; }
+.cigar-D { background: #ffcdd2; color: #c62828; }
+.cigar-S { background: #fff9c4; color: #f57f17; }
+.cigar-H { background: #f3e5f5; color: #6a1b9a; }
+.cigar-N { background: #e0e0e0; color: #666; }
+
+.mapq-good { color: #2e7d32; font-weight: 600; }
+.mapq-ok { color: #e65100; font-weight: 600; }
+.mapq-bad { color: #c62828; font-weight: 600; }
+
+.chr-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.bam-pagination {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.bam-pagination button {
+  padding: 4px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 12px;
+}
+.bam-pagination button:hover { background: #eee; }
+.bam-pagination button.current { background: #4a90d9; color: #fff; border-color: #4a90d9; }
+.bam-pagination .page-info { font-size: 12px; color: #666; margin: 0 8px; }
+
+.bam-loading { text-align: center; padding: 40px; color: #888; }
+.bam-error { color: #c62828; padding: 16px; }
+
+.bam-header-section {
+  margin-bottom: 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.bam-header-toggle {
+  padding: 8px 12px;
+  background: #f7f8fa;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  border-bottom: 1px solid #e0e0e0;
+}
+.bam-header-toggle:hover { background: #ebedf0; }
+.bam-header-content {
+  padding: 8px 12px;
+  font-family: monospace;
+  font-size: 11px;
+  max-height: 200px;
+  overflow: auto;
+  background: #fafafa;
+}

@@ -1,0 +1,10 @@
+{
+  "name": "bam-viewer",
+  "version": "1.0.0",
+  "description": "BAM alignment viewer with BGZF decompression, FLAG decoding, CIGAR visualization, and MAPQ filtering",
+  "extensions": [
+    "bam"
+  ],
+  "entry": "index.js",
+  "style": "style.css"
+}
