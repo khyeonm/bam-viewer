@@ -1,10 +1,20 @@
 {
   "name": "bam-viewer",
-  "version": "1.1.0",
-  "description": "BAM alignment viewer with IGV.js integration, BGZF decompression, FLAG decoding, CIGAR visualization, and MAPQ filtering",
+  "version": "1.2.0",
+  "description": "BAM alignment viewer with BGZF decompression, FLAG decoding, CIGAR visualization, and MAPQ filtering",
   "extensions": [
     "bam"
   ],
   "entry": "index.js",
-  "style": "style.css"
+  "style": "style.css",
+  "data_source": {
+    "type": "docker",
+    "image": "biocontainers/samtools:v1.9-4-deb_cv1",
+    "row_count": "samtools view {file} | head -100 | wc -l",
+    "metadata": "samtools view -H {file}",
+    "rows": "samtools view {file} | head -100",
+    "col_headers": ["Read Name", "Flag", "Chr", "Pos", "MAPQ", "CIGAR", "Sequence"],
+    "meta_parse": "bam_style",
+    "allow_nonzero_exit": true
+  }
 }
