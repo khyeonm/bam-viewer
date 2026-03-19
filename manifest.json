@@ -1,7 +1,7 @@
 {
   "name": "bam-viewer",
-  "version": "1.2.0",
-  "description": "BAM alignment viewer with BGZF decompression, FLAG decoding, CIGAR visualization, and MAPQ filtering",
+  "version": "1.3.0",
+  "description": "BAM alignment viewer with server-side pagination, FLAG decoding, CIGAR visualization, and MAPQ filtering",
   "extensions": [
     "bam"
   ],
@@ -10,11 +10,22 @@
   "data_source": {
     "type": "docker",
     "image": "biocontainers/samtools:v1.9-4-deb_cv1",
-    "row_count": "samtools view {file} | head -100 | wc -l",
-    "metadata": "samtools view -H {file}",
-    "rows": "samtools view {file} | head -100",
-    "col_headers": ["Read Name", "Flag", "Chr", "Pos", "MAPQ", "CIGAR", "Sequence"],
+    "row_count": "samtools view -c '{file}'",
+    "metadata": "samtools view -H '{file}'",
+    "rows": "samtools view '{file}' | sed -n '{start},{end}p'",
+    "col_headers": ["Read Name", "Flag", "Chr", "Pos", "MAPQ", "CIGAR", "RNEXT", "PNEXT", "TLEN", "Sequence", "Quality"],
     "meta_parse": "bam_style",
-    "allow_nonzero_exit": true
+    "allow_nonzero_exit": true,
+    "fallback": [
+      {
+        "type": "text",
+        "row_count": "samtools view -c '{file}'",
+        "metadata": "samtools view -H '{file}'",
+        "rows": "samtools view '{file}' | sed -n '{start},{end}p'",
+        "col_headers": ["Read Name", "Flag", "Chr", "Pos", "MAPQ", "CIGAR", "RNEXT", "PNEXT", "TLEN", "Sequence", "Quality"],
+        "meta_parse": "bam_style",
+        "allow_nonzero_exit": true
+      }
+    ]
   }
 }
