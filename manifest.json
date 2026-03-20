@@ -1,6 +1,6 @@
 {
   "name": "bam-viewer",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "BAM alignment viewer with server-side pagination, FLAG decoding, CIGAR visualization, and MAPQ filtering",
   "extensions": [
     "bam"

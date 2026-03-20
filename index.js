@@ -124,7 +124,7 @@
   }
 
   function _renderIgv(container, fileUrl, filename) {
-    container.innerHTML = '<div id="__igv_div__">Loading IGV.js...</div>';
+    container.innerHTML = '<div id="__igv_div__" class="ap-loading">Loading...</div>';
     _loadIgvJs().then(function() {
       var div = document.getElementById('__igv_div__');
       if (!div) return;
@@ -255,9 +255,7 @@
     var content = target.querySelector('#__plugin_content__');
     if (content) target = content;
 
-    if (page > 0) {
-      target.innerHTML = '<div class="bam-plugin"><div class="bam-loading">Loading page...</div></div>';
-    }
+    target.innerHTML = '<div class="ap-loading">Loading...</div>';
 
     var data = await fetchPage(name, page);
     if (data.error) {
@@ -331,7 +329,7 @@
       _filterMinMapq = 0;
       _showHeader = false;
 
-      _container.innerHTML = '<div class="bam-plugin"><div class="bam-loading">Loading BAM...</div></div>';
+      _container.innerHTML = '<div class="ap-loading">Loading...</div>';
 
       _fetchReference().then(function() {
         _showView(container, fileUrl, filename);
