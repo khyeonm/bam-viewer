@@ -1,6 +1,7 @@
 // AutoPipe Plugin: bam-viewer
-// BAM alignment viewer with server-side pagination via samtools
-// Uses /data/ endpoint for paginated data (Docker or local samtools)
+// BAM alignment viewer. Reads BGZF and the BAI in the browser, so both tabs
+// work without samtools or Docker on the server; /data/ stays as a fallback.
+// igv.js is bundled alongside this file so the IGV tab works offline too.
 
 (function() {
   var PAGE_SIZE = 100;
@@ -91,7 +92,19 @@
     return '<span class="' + cls + '">' + v + '</span>';
   }
 
-  async function fetchPage(name, page) {
+  // Page data comes from parsing the BAM in the browser. The /data/ endpoint
+  // shells out to samtools on the server, which is not available everywhere —
+  // Docker may be installed but unusable by the SSH account, the image pull
+  // needs internet, and HPC nodes often have neither. Reading the file directly
+  // over /file/ Range requests makes the Data tab behave the same everywhere,
+  // exactly as the IGV tab already does.
+  function fetchPage(name, page) {
+    return _fetchPageLocal(name, page).catch(function() {
+      return _fetchPageServer(name, page);
+    });
+  }
+
+  async function _fetchPageServer(name, page) {
     var resp = await fetch(
       '/data/' + encodeURIComponent(name) + '?page=' + page + '&page_size=' + PAGE_SIZE
     );
@@ -104,15 +117,24 @@
       .catch(function() { _igvRef = null; });
   }
 
+  // igv.js ships inside the plugin so the viewer works on machines with no
+  // internet access. The CDN stays as a fallback for installs that predate the
+  // bundled copy.
+  var IGV_LOCAL = '/plugin/bam-viewer/igv.min.js';
+  var IGV_CDN = 'https://cdn.jsdelivr.net/npm/igv@3/dist/igv.min.js';
+
   function _loadIgvJs() {
-    return new Promise(function(resolve, reject) {
-      if (window.igv) { resolve(); return; }
-      var s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/igv@3/dist/igv.min.js';
-      s.onload = function() { resolve(); };
-      s.onerror = function() { reject(new Error('Failed to load igv.js')); };
-      document.head.appendChild(s);
-    });
+    if (window.igv) return Promise.resolve();
+    function load(src) {
+      return new Promise(function(resolve, reject) {
+        var s = document.createElement('script');
+        s.src = src;
+        s.onload = function() { resolve(); };
+        s.onerror = function() { reject(new Error('Failed to load ' + src)); };
+        document.head.appendChild(s);
+      });
+    }
+    return load(IGV_LOCAL).catch(function() { return load(IGV_CDN); });
   }
 
   // The reference arrives either as a genome ID, a bare filename, or a full
@@ -216,20 +238,26 @@
       });
     }
 
+    // `consumed` is how many compressed bytes were used, so a sequential
+    // reader knows where the next fetch has to start.
     return step().then(function(list) {
       var total = 0;
       list.forEach(function(a) { total += a.length; });
       var out = new Uint8Array(total);
       var at = 0;
       list.forEach(function(a) { out.set(a, at); at += a.length; });
-      return out;
+      return { data: out, consumed: off };
     });
+  }
+
+  function _bgzfInflateData(buffer) {
+    return _bgzfInflate(buffer).then(function(r) { return r.data; });
   }
 
   // @SQ names in BAM order — the BAI addresses references by this index.
   function _readBamRefNames(fileUrl) {
     return _rangeFetch(fileUrl, 0, 262143)
-      .then(_bgzfInflate)
+      .then(_bgzfInflateData)
       .then(function(buf) {
         var dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
         if (dv.getUint32(0, true) !== 0x014D4142) throw new Error('not a BAM file');
@@ -291,7 +319,7 @@
     // A BGZF block holds at most 64KB; fetch several so the record cannot be
     // cut short by a block boundary.
     return _rangeFetch(fileUrl, loc.coffset, loc.coffset + 262143)
-      .then(_bgzfInflate)
+      .then(_bgzfInflateData)
       .then(function(buf) {
         var dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
         return {
@@ -332,6 +360,220 @@
         return _locusAround(rec[2], parseInt(rec[3], 10));   // RNAME, POS
       })
       .catch(function() { return null; });
+  }
+
+  // ── Browser-side BAM reader (Data tab) ──
+
+  var BAM_CHUNK = 1 << 20;   // compressed bytes fetched per refill
+
+  // Sequential reader over the uncompressed BAM stream, refilling from /file/
+  // as needed. `pos` is the read offset inside the currently inflated buffer.
+  function _bamReader(fileUrl, coffset) {
+    var st = { coffset: coffset || 0, buf: new Uint8Array(0), pos: 0, eof: false };
+
+    function need(n) {
+      if (st.buf.length - st.pos >= n) return Promise.resolve(true);
+      if (st.eof) return Promise.resolve(false);
+      return _rangeFetch(fileUrl, st.coffset, st.coffset + BAM_CHUNK - 1)
+        .then(function(ab) {
+          if (ab.byteLength === 0) { st.eof = true; return false; }
+          return _bgzfInflate(ab).then(function(res) {
+            if (!res.consumed) { st.eof = true; return false; }
+            st.coffset += res.consumed;
+            if (ab.byteLength < BAM_CHUNK) st.eof = true;
+            // Keep whatever has not been read yet, then append the new bytes.
+            var tail = st.buf.subarray(st.pos);
+            var merged = new Uint8Array(tail.length + res.data.length);
+            merged.set(tail, 0);
+            merged.set(res.data, tail.length);
+            st.buf = merged;
+            st.pos = 0;
+            return need(n);
+          });
+        })
+        .catch(function() { st.eof = true; return false; });
+    }
+
+    function view() {
+      return new DataView(st.buf.buffer, st.buf.byteOffset, st.buf.length);
+    }
+
+    return {
+      need: need,
+      view: view,
+      state: st,
+      skip: function(n) { st.pos += n; },
+      bytes: function(off, len) { return st.buf.subarray(off, off + len); }
+    };
+  }
+
+  // magic + l_text + text + n_ref + per-reference (l_name, name, l_ref)
+  function _readHeader(rd) {
+    return rd.need(8).then(function(ok) {
+      if (!ok) throw new Error('truncated BAM');
+      if (rd.view().getUint32(rd.state.pos, true) !== 0x014D4142) {
+        throw new Error('not a BAM file');
+      }
+      var lText = rd.view().getInt32(rd.state.pos + 4, true);
+      return rd.need(8 + lText + 4).then(function(ok2) {
+        if (!ok2) throw new Error('truncated BAM header');
+        var decoder = new TextDecoder();
+        var text = decoder.decode(rd.bytes(rd.state.pos + 8, lText)).replace(/\0+$/, '');
+        rd.skip(8 + lText);
+        var nRef = rd.view().getInt32(rd.state.pos, true);
+        rd.skip(4);
+
+        var refs = [];
+        function readRef(i) {
+          if (i >= nRef) return Promise.resolve({ text: text, refs: refs });
+          return rd.need(4).then(function() {
+            var lName = rd.view().getInt32(rd.state.pos, true);
+            return rd.need(4 + lName + 4).then(function() {
+              refs.push({
+                name: decoder.decode(rd.bytes(rd.state.pos + 4, lName - 1)),
+                length: rd.view().getInt32(rd.state.pos + 4 + lName, true)
+              });
+              rd.skip(4 + lName + 4);
+              return readRef(i + 1);
+            });
+          });
+        }
+        return readRef(0);
+      });
+    });
+  }
+
+  // One alignment record → the same column order `samtools view` emits, which
+  // is what renderTable already expects.
+  function _parseAlignment(rd, refs) {
+    var dv = rd.view();
+    var p = rd.state.pos;
+    var refId = dv.getInt32(p + 4, true);
+    var pos = dv.getInt32(p + 8, true);
+    var lReadName = dv.getUint8(p + 12);
+    var mapq = dv.getUint8(p + 13);
+    var nCigar = dv.getUint16(p + 16, true);
+    var flag = dv.getUint16(p + 18, true);
+    var nextRefId = dv.getInt32(p + 24, true);
+    var nextPos = dv.getInt32(p + 28, true);
+    var tlen = dv.getInt32(p + 32, true);
+
+    var nameOff = p + 36;
+    var qname = new TextDecoder().decode(rd.bytes(nameOff, lReadName - 1));
+
+    var cigar = '';
+    var cigarOff = nameOff + lReadName;
+    for (var i = 0; i < nCigar; i++) {
+      var v = dv.getUint32(cigarOff + i * 4, true);
+      cigar += (v >>> 4) + CIGAR_OPS.charAt(v & 0xF);
+    }
+
+    var name = function(id) { return (id >= 0 && refs[id]) ? refs[id].name : '*'; };
+    return [
+      qname, String(flag), name(refId), String(pos + 1), String(mapq), cigar || '*',
+      name(nextRefId), String(nextPos + 1), String(tlen), '*', '*'
+    ];
+  }
+
+  function _readRecords(rd, refs, skip, take) {
+    var rows = [];
+    function step() {
+      if (rows.length >= take) return Promise.resolve(rows);
+      return rd.need(4).then(function(ok) {
+        if (!ok) return rows;
+        var blockSize = rd.view().getInt32(rd.state.pos, true);
+        if (blockSize <= 0) return rows;
+        return rd.need(4 + blockSize).then(function(ok2) {
+          if (!ok2) return rows;
+          if (skip > 0) {
+            skip--;
+          } else {
+            rows.push(_parseAlignment(rd, refs));
+          }
+          rd.skip(4 + blockSize);
+          return step();
+        });
+      });
+    }
+    return step();
+  }
+
+  // Exact record count from the BAI pseudo-bin (37450), which stores the
+  // mapped/unmapped totals per reference — the same source `samtools idxstats`
+  // uses. Avoids walking the whole file just to fill in the page count.
+  function _readBaiTotal(indexUrl) {
+    return fetch(indexUrl)
+      .then(function(r) {
+        if (!r.ok) throw new Error('index fetch failed: ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function(buf) {
+        var dv = new DataView(buf);
+        if (dv.getUint32(0, true) !== 0x01494142) throw new Error('not a BAI file');
+        var u64 = function(o) { return dv.getUint32(o, true) + dv.getUint32(o + 4, true) * 4294967296; };
+        var off = 4;
+        var nRef = dv.getInt32(off, true);
+        off += 4;
+        var total = 0;
+        for (var r = 0; r < nRef; r++) {
+          var nBin = dv.getInt32(off, true);
+          off += 4;
+          for (var b = 0; b < nBin; b++) {
+            var bin = dv.getUint32(off, true);
+            var nChunk = dv.getInt32(off + 4, true);
+            if (bin === 37450 && nChunk === 2) {
+              total += u64(off + 8 + 16) + u64(off + 8 + 24);   // mapped + unmapped
+            }
+            off += 8 + nChunk * 16;
+          }
+          off += 4 + dv.getInt32(off, true) * 8;                // linear index
+        }
+        if (off + 8 <= buf.byteLength) total += u64(off);       // unplaced reads
+        return total;
+      })
+      .catch(function() { return null; });
+  }
+
+  // One live cursor is kept so paging forward stays incremental; jumping
+  // backwards or far ahead simply reopens from the start of the file.
+  var _cursor = null;
+
+  function _fetchPageLocal(name, page) {
+    if (typeof DecompressionStream === 'undefined') {
+      return Promise.reject(new Error('DecompressionStream unavailable'));
+    }
+    var fileUrl = _fileUrl || ('/file/' + encodeURIComponent(name));
+
+    var reuse = _cursor && _cursor.name === name && _cursor.page === page - 1;
+    var start = reuse
+      ? Promise.resolve({ rd: _cursor.rd, refs: _cursor.refs, text: _cursor.text, skip: 0 })
+      : (function() {
+          var rd = _bamReader(fileUrl, 0);
+          return _readHeader(rd).then(function(h) {
+            return { rd: rd, refs: h.refs, text: h.text, skip: page * PAGE_SIZE };
+          });
+        })();
+
+    return start.then(function(ctx) {
+      return _readRecords(ctx.rd, ctx.refs, ctx.skip, PAGE_SIZE).then(function(rows) {
+        _cursor = { name: name, page: page, rd: ctx.rd, refs: ctx.refs, text: ctx.text };
+        var indexUrl = _cursor.indexUrl;
+        return _findIndex(fileUrl, ['bai', 'csi']).then(function(idx) {
+          return (idx ? _readBaiTotal(idx) : Promise.resolve(null)).then(function(total) {
+            return {
+              rows: rows,
+              // Without an index the true count is unknown; report what has been
+              // reached so pagination stays usable instead of claiming zero.
+              total: total !== null ? total : page * PAGE_SIZE + rows.length,
+              page: page,
+              page_size: PAGE_SIZE,
+              header: ctx.text,
+              refs: ctx.refs
+            };
+          });
+        });
+      });
+    });
   }
 
   function _resolveLocus(filename, fileUrl, indexUrl) {
