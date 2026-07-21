@@ -154,25 +154,191 @@
     }, Promise.resolve(null));
   }
 
+  // ── Locus discovery ──
+  //
   // Without an explicit locus igv.js opens at the whole first chromosome (or
   // the whole genome when the reference has several contigs), which is far
   // past the alignment track's visibility window — the track renders nothing.
-  // Anchor the initial view on the first actual alignment instead.
-  function _resolveLocus(filename) {
+  // So the opening view has to be anchored on the first actual alignment.
+  //
+  // Finding it must not go through /data/. That endpoint shells out to
+  // samtools on the server, which the IGV tab otherwise never needs: igv.js
+  // reads BGZF and the BAI itself. Reading the index here keeps the two tabs
+  // independent, so IGV still works on a server without samtools or Docker.
+
+  function _rangeFetch(url, start, end) {
+    return fetch(url, { headers: { Range: 'bytes=' + start + '-' + end } })
+      .then(function(r) {
+        if (!r.ok) throw new Error('range request failed: ' + r.status);
+        return r.arrayBuffer();
+      });
+  }
+
+  function _inflateGzip(bytes) {
+    var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Response(stream).arrayBuffer();
+  }
+
+  // BGZF is a run of standalone gzip members. Each is decompressed on its own
+  // so this does not rely on multi-member support in DecompressionStream.
+  function _bgzfInflate(buffer) {
+    var view = new DataView(buffer);
+    var parts = [];
+    var off = 0;
+
+    function step() {
+      if (off + 18 > buffer.byteLength) return Promise.resolve(parts);
+      if (view.getUint8(off) !== 0x1f || view.getUint8(off + 1) !== 0x8b) {
+        return Promise.resolve(parts);
+      }
+      // Locate the BC extra subfield, which carries the member length - 1.
+      var xlen = view.getUint16(off + 10, true);
+      var bsize = -1;
+      var p = off + 12;
+      var xend = p + xlen;
+      while (p + 4 <= xend) {
+        var slen = view.getUint16(p + 2, true);
+        if (view.getUint8(p) === 66 && view.getUint8(p + 1) === 67) {
+          bsize = view.getUint16(p + 4, true) + 1;
+          break;
+        }
+        p += 4 + slen;
+      }
+      // A truncated trailing member just ends the walk — the caller only ever
+      // needs the leading blocks of whatever range was fetched.
+      if (bsize <= 0 || off + bsize > buffer.byteLength) return Promise.resolve(parts);
+
+      var member = new Uint8Array(buffer, off, bsize);
+      off += bsize;
+      return _inflateGzip(member).then(function(out) {
+        parts.push(new Uint8Array(out));
+        return step();
+      });
+    }
+
+    return step().then(function(list) {
+      var total = 0;
+      list.forEach(function(a) { total += a.length; });
+      var out = new Uint8Array(total);
+      var at = 0;
+      list.forEach(function(a) { out.set(a, at); at += a.length; });
+      return out;
+    });
+  }
+
+  // @SQ names in BAM order — the BAI addresses references by this index.
+  function _readBamRefNames(fileUrl) {
+    return _rangeFetch(fileUrl, 0, 262143)
+      .then(_bgzfInflate)
+      .then(function(buf) {
+        var dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        if (dv.getUint32(0, true) !== 0x014D4142) throw new Error('not a BAM file');
+        var off = 8 + dv.getInt32(4, true);          // magic + l_text + text
+        var nRef = dv.getInt32(off, true);
+        off += 4;
+        var names = [];
+        var decoder = new TextDecoder();
+        for (var i = 0; i < nRef; i++) {
+          var lName = dv.getInt32(off, true);
+          off += 4;
+          names.push(decoder.decode(new Uint8Array(buf.buffer, buf.byteOffset + off, lName - 1)));
+          off += lName + 4;                          // name (NUL-terminated) + l_ref
+        }
+        return names;
+      });
+  }
+
+  // First populated entry of the linear index → virtual offset of the first
+  // alignment in the file.
+  function _readBaiFirstOffset(indexUrl) {
+    return fetch(indexUrl)
+      .then(function(r) {
+        if (!r.ok) throw new Error('index fetch failed: ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function(buf) {
+        var dv = new DataView(buf);
+        if (dv.getUint32(0, true) !== 0x01494142) throw new Error('not a BAI file');
+        var off = 4;
+        var nRef = dv.getInt32(off, true);
+        off += 4;
+        for (var r = 0; r < nRef; r++) {
+          var nBin = dv.getInt32(off, true);
+          off += 4;
+          for (var b = 0; b < nBin; b++) {
+            off += 4;                                // bin id
+            var nChunk = dv.getInt32(off, true);
+            off += 4 + nChunk * 16;                  // chunk begin/end pairs
+          }
+          var nIntv = dv.getInt32(off, true);
+          off += 4;
+          for (var i = 0; i < nIntv; i++) {
+            var lo = dv.getUint32(off, true);
+            var hi = dv.getUint32(off + 4, true);
+            off += 8;
+            if (lo !== 0 || hi !== 0) {
+              // 64-bit virtual offset: high 48 bits address the BGZF block,
+              // low 16 the position inside its uncompressed payload.
+              return { refId: r, coffset: hi * 65536 + Math.floor(lo / 65536), uoffset: lo % 65536 };
+            }
+          }
+        }
+        throw new Error('index contains no aligned reads');
+      });
+  }
+
+  function _readAlignmentAt(fileUrl, loc) {
+    // A BGZF block holds at most 64KB; fetch several so the record cannot be
+    // cut short by a block boundary.
+    return _rangeFetch(fileUrl, loc.coffset, loc.coffset + 262143)
+      .then(_bgzfInflate)
+      .then(function(buf) {
+        var dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        return {
+          refId: dv.getInt32(loc.uoffset + 4, true),
+          pos: dv.getInt32(loc.uoffset + 8, true) + 1   // stored 0-based
+        };
+      });
+  }
+
+  function _locusAround(chrom, pos) {
+    if (!chrom || chrom === '*' || !(pos >= 1)) return null;
+    // Open just ahead of the first read so the window fills with data rather
+    // than centring on the edge of the covered region.
+    var start = Math.max(1, pos - Math.floor(IGV_WINDOW * 0.1));
+    return chrom + ':' + start + '-' + (start + IGV_WINDOW);
+  }
+
+  function _resolveLocusFromIndex(fileUrl, indexUrl) {
+    if (typeof DecompressionStream === 'undefined') return Promise.resolve(null);
+    return Promise.all([_readBaiFirstOffset(indexUrl), _readBamRefNames(fileUrl)])
+      .then(function(res) {
+        var loc = res[0], names = res[1];
+        return _readAlignmentAt(fileUrl, loc).then(function(rec) {
+          var id = rec.refId >= 0 ? rec.refId : loc.refId;
+          return _locusAround(names[id], rec.pos);
+        });
+      })
+      .catch(function() { return null; });
+  }
+
+  // Fallback for BAMs with no usable index. Needs samtools on the server.
+  function _resolveLocusFromData(filename) {
     return fetch('/data/' + encodeURIComponent(filename) + '?page=0&page_size=1')
       .then(function(r) { return r.json(); })
       .then(function(d) {
         var rec = d && d.rows && d.rows[0];
         if (!rec) return null;
-        var chrom = rec[2];               // RNAME
-        var pos = parseInt(rec[3], 10);   // POS, 1-based
-        if (!chrom || chrom === '*' || isNaN(pos)) return null;
-        // Open just ahead of the first read so the window fills with data
-        // rather than centring on the edge of the covered region.
-        var start = Math.max(1, pos - Math.floor(IGV_WINDOW * 0.1));
-        return chrom + ':' + start + '-' + (start + IGV_WINDOW);
+        return _locusAround(rec[2], parseInt(rec[3], 10));   // RNAME, POS
       })
       .catch(function() { return null; });
+  }
+
+  function _resolveLocus(filename, fileUrl, indexUrl) {
+    var viaIndex = indexUrl ? _resolveLocusFromIndex(fileUrl, indexUrl) : Promise.resolve(null);
+    return viaIndex.then(function(locus) {
+      return locus || _resolveLocusFromData(filename);
+    });
   }
 
   function _buildGenomeDropdown() {
@@ -204,11 +370,16 @@
 
     return Promise.all([
       _loadIgvJs(),
-      _resolveLocus(filename),
       _findIndex(fileUrl, ['bai', 'csi']),
       isKnownGenome ? Promise.resolve(null) : _findIndex(_refUrl(activeRef), ['fai'])
-    ]).then(function(results) {
-      var locus = results[1], trackIndex = results[2], refIndex = results[3];
+    ]).then(function(probes) {
+      var trackIndex = probes[1], refIndex = probes[2];
+      // Locus discovery needs the index URL, so it runs after the probes.
+      return _resolveLocus(filename, fileUrl, trackIndex).then(function(locus) {
+        return { locus: locus, trackIndex: trackIndex, refIndex: refIndex };
+      });
+    }).then(function(results) {
+      var locus = results.locus, trackIndex = results.trackIndex, refIndex = results.refIndex;
       // The user may have switched tabs while the probes were in flight.
       if (!div.isConnected) return;
       div.textContent = '';
@@ -232,7 +403,18 @@
       if (locus) opts.locus = locus;
 
       var track = { type: 'alignment', format: 'bam', url: fileUrl, name: filename };
-      if (trackIndex) track.indexURL = trackIndex;
+      if (trackIndex) {
+        track.indexURL = trackIndex;
+      } else {
+        // igv.js needs an index to random-access a BAM. Say so, rather than
+        // leaving an empty track with no explanation.
+        var note = document.createElement('div');
+        note.style.cssText = 'padding:8px 12px;margin-bottom:8px;border-radius:4px;' +
+          'background:#fff8e1;border:1px solid #ffe082;color:#795548;font-size:12px';
+        note.textContent = 'No index (.bai) found next to this BAM. IGV cannot ' +
+          'load alignments without one — run "samtools index" on the file.';
+        container.insertBefore(note, div);
+      }
       opts.tracks = [track];
 
       // Returned, not fire-and-forget: a rejected createBrowser used to become
